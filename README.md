@@ -49,3 +49,6 @@ Unlike traditional tools that shift entire regions loosely, OttoAlign2 utilizes 
 
 ## Cache Management
 If you cancel a job mid-way or want to free up space from completed `.zip` artifacts, you can click the red "Vider la Cache" button in the top right corner of the UI.
+
+---
+*Conçu par Sébastien Bédard*
