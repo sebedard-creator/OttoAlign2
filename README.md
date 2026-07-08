@@ -19,6 +19,11 @@ Unlike traditional tools that shift entire regions loosely, OttoAlign2 utilizes 
 * **Bit-Perfect 24-bit Audio:** Processed via `soundfile`, bypassing `scipy.io` to ensure no bit-depth clipping occurs during read/write.
 * **Automatic Garbage Collection:** Dealing with uncompressed WAV archives requires a lot of disk space. OttoAlign2 automatically purges extracted files and temporary processing folders the moment a job is completed.
 
+## Current Limitations
+
+* **Clip Gain:** Due to inherent limitations in the AAF export format from Pro Tools and other DAWs, static Clip Gain metadata is not perfectly translated or retained during the alignment reconstruction. 
+* **Supported Automations:** While Clip Gain is limited, **Volume Envelopes** and **Fades** (true virtual fades, not rendered) are fully supported and will perfectly translate back to your DAW.
+
 ## Architecture Stack
 
 * **Backend:** Python 3.11
