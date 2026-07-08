@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OttoAlign2</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="panel">
+        <button id="clear-cache-btn" style="position: absolute; top: 15px; right: 15px; width: auto; background: #e53935; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 0.8em; box-shadow: 0 2px 6px rgba(229,57,53,0.3); transition: background 0.2s;" onmouseover="this.style.background='#d32f2f';" onmouseout="this.style.background='#e53935';">Vider la Cache</button>
+        <header>
+            <h1>OttoAlign2</h1>
+            <p>Phase & Time Alignment</p>
+        </header>
+
+        <form id="align-form">
+            <div class="input-group">
+                <label for="ref-file">Reference ZIP (ex: Perche)</label>
+                <input type="file" id="ref-file" accept=".zip" required>
+            </div>
+
+            <div class="input-group">
+                <label for="tgt-file">Target ZIP (ex: Cravate)</label>
+                <input type="file" id="tgt-file" accept=".zip" required>
+            </div>
+
+            <button type="submit" id="render-btn">
+                <span class="btn-text">PROCESS</span>
+                <div class="loader hidden"></div>
+            </button>
+        </form>
+
+        <div class="loading" id="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Téléchargement et analyse en cours...</p>
+            <pre id="log-box" style="margin-top: 15px; background: rgba(0,0,0,0.3); padding: 10px; border-radius: 8px; text-align: left; font-family: monospace; font-size: 0.9em; max-height: 200px; overflow-y: auto; color: #a5d6a7; border: 1px solid rgba(255,255,255,0.1); white-space: pre-wrap;"></pre>
+        </div>
+
+        <div id="status-message" class="hidden"></div>
+    </div>
+    
+    <img src="otto.png" id="otto-easter-egg" style="position: fixed; bottom: -10px; right: 30px; width: 220px; pointer-events: none; opacity: 0.9; z-index: 0; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); transition: transform 0.3s;" title="Rock on!">
+    <script src="app.js?v=4"></script>
+</body>
+</html>

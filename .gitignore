@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+
+# Generated Audio
+Aligned_Audio_Files/
+*_ottoaligned.wav
+
+# IDEs
+.idea/
+.vscode/
+temp/  
+.venv/
