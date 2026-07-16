@@ -1,80 +1,78 @@
 # OttoAlign2
 
-> L’interface web, les journaux et les rapports sont en français. Le code conserve des noms techniques en anglais.
+> The web interface, logs, and reports are in French. The code keeps technical names in English.
 
-![Interface OttoAlign2](OttoAlign2.png)
+![OttoAlign2 Interface](OttoAlign2.png)
 
-## Vue d’ensemble
+## Overview
 
-OttoAlign2 aligne automatiquement les clips d’une session cible AAF ou PTX sur l’audio d’une session de référence. Le moteur estime une courbe de délai par GCC-PHAT, la lisse, puis applique un retard fractionnaire par interpolation cubique. Il vise les workflows de postproduction où plusieurs microphones couvrent la même source; il ne remplace ni l’écoute critique ni une validation finale dans le DAW.
+OttoAlign2 automatically aligns clips from a target AAF or PTX session to the audio of a reference session. The engine estimates a delay curve using GCC-PHAT, smooths it, then applies a fractional delay via cubic interpolation. It targets post-production workflows where multiple microphones cover the same source; it does not replace critical listening or final validation in the DAW.
 
-## Fonctionnalités
+## Features
 
-- Traitement de toutes les pistes et de tous les clips cibles possédant un chevauchement avec la référence.
-- Lecture paresseuse : seule la portion réellement superposée est chargée, même si le fichier source dure plusieurs dizaines de minutes.
-- Fréquence d’échantillonnage lue dans chaque WAV; les deux médias d’une paire doivent avoir la même fréquence.
-- Courbe calculée sur le premier canal, puis appliquée à l’identique à tous les canaux du média cible.
-- Recherche de délai configurable, limitée par défaut à ±20 ms.
-- Rapport `OttoAlign_Report.txt` listant les clips alignés, ignorés et leur correction moyenne.
-- Extraction ZIP protégée contre les chemins sortant du répertoire de travail; limite HTTP de 2 Go pour la requête complète.
+- Processes all tracks and target clips that overlap with the reference.
+- Lazy loading: only the actually overlapping portion is loaded, even if the source file lasts dozens of minutes.
+- Sample rate read from each WAV; both media in a pair must share the same sample rate.
+- Delay curve computed on the first channel, then applied identically to all channels of the target media.
+- Configurable delay search, limited to ±20 ms by default.
+- `OttoAlign_Report.txt` report listing aligned clips, skipped clips, and their average correction.
+- ZIP extraction protected against paths escaping the working directory; 2 GB HTTP limit for the full request.
 
-### Traitement PTX non destructif
+### Non-destructive PTX processing
 
-Pour chaque placement PTX admissible, OttoAlign2 :
+For each eligible PTX placement, OttoAlign2:
 
-1. lit seulement la portion visible qui chevauche la référence;
-2. copie le WAV source complet dans un rendu temporaire et remplace uniquement cette portion audio;
-3. demande à `pt_api.relink_clip()` de créer un nouveau WAV indépendant, avec une nouvelle identité média BWF/PTX;
-4. retargete uniquement le placement concerné et lui attribue un nom de clip unique (`_ALIGNED`, `_ALIGNED_2`, etc.).
+1. reads only the visible portion that overlaps with the reference;
+2. copies the full source WAV into a temporary render and replaces only that audio portion;
+3. calls `pt_api.relink_clip()` to create a new independent WAV, with a new BWF/PTX media identity;
+4. retargets only the affected placement and assigns it a unique clip name (`_ALIGNED`, `_ALIGNED_2`, etc.).
 
-Le PTX original et ses WAV ne sont jamais écrasés. Les échantillons hors de la portion traitée restent ceux du fichier source. Le nouveau WAV conserve le conteneur et le sous-type PCM du média Pro Tools, tout en renouvelant les métadonnées nécessaires au relink.
+The original PTX and its WAVs are never overwritten. Samples outside the processed portion remain those of the source file. The new WAV keeps the container and PCM subtype of the Pro Tools media, while renewing the metadata needed for relinking.
 
-La validation de production couvre une référence d’environ 42 minutes, 404 placements cibles sur deux pistes, 388 placements alignés et 16 clips ignorés parce que leur chevauchement était inférieur à 0,5 seconde. Les 388 WAV générés étaient en ligne; la session complète s’est ouverte et a joué correctement dans Pro Tools. Un même clip source placé plusieurs fois a bien reçu des identités média distinctes.
+### AAF processing
 
-### Traitement AAF
+The legacy AAF path writes WAVs suffixed `_ottoaligned`, modifies locators in a read-write copy of the AAF, then passes the output to `orchestrator.py`. It is maintained, but the extensive Pro Tools validation described above covers the PTX path.
 
-Le chemin AAF historique écrit des WAV suffixés `_ottoaligned`, modifie les locators dans une copie AAF ouverte en lecture-écriture, puis passe la sortie à `orchestrator.py`. Il est maintenu, mais la validation Pro Tools exhaustive décrite ci-dessus porte sur le chemin PTX.
+## Installation and usage
 
-## Installation et utilisation
-
-L’environnement actuellement validé utilise Python 3.11.
+The currently validated environment uses Python 3.11.
 
 ```bash
 python -m pip install -r requirements.txt
 python server.py
 ```
 
-Ouvrir ensuite `http://localhost:8081`.
+Then open `http://localhost:8081`.
 
-Chaque archive doit contenir exactement une session complète `.aaf` ou `.ptx`, avec un dossier `Audio Files` placé à côté de cette session. Les dossiers peuvent être imbriqués dans le ZIP, mais la paire session/dossier doit être non ambiguë.
+Each archive must contain exactly one complete `.aaf` or `.ptx` session, with an `Audio Files` folder placed alongside that session. Folders can be nested within the ZIP, but the session/folder pair must be unambiguous.
 
-Le résultat `OttoAligned_Result.zip` contient :
+The `OttoAligned_Result.zip` result contains:
 
-- `OttoAligned.ptx` ou `OttoAligned.aaf`;
-- le dossier `Audio Files` nécessaire à la sortie;
+- `OttoAligned.ptx` or `OttoAligned.aaf`;
+- the `Audio Files` folder required for the output;
 - `OttoAlign_Report.txt`.
 
-Pour une cible PTX, le ZIP contient les WAV originaux de la cible et les nouveaux WAV alignés, puisque la session peut encore référencer les deux familles. Le serveur supprime ensuite les données extraites et conserve le ZIP final jusqu’au téléchargement ou au vidage du cache.
+For a PTX target, the ZIP contains the target's original WAVs and the new aligned WAVs, since the session may still reference both families. The server then deletes the extracted data and keeps the final ZIP until download or cache clearing.
 
-## Limites explicites
+## Explicit limitations
 
-- Les médias physiques doivent être des WAV. Le chemin PTX exige les layouts et métadonnées Pro Tools documentés par la version de `pt_api` installée.
-- Un chevauchement inférieur à 0,5 seconde est ignoré.
-- Les médias de référence et cible d’une paire doivent avoir la même fréquence d’échantillonnage; aucun rééchantillonnage n’est effectué.
-- Le délai est calculé depuis le premier canal. La même courbe est imposée aux autres canaux; aucun alignement indépendant par canal n’est effectué.
-- La fenêtre de recherche par défaut est ±20 ms. Un décalage réel plus grand ne sera pas trouvé sans augmenter `max_shift_ms` lors d’un appel direct au moteur.
-- Le DSP peut introduire des zéros aux frontières lorsque la courbe demande des échantillons situés hors de la portion disponible.
-- Le PTX génère un WAV complet indépendant par placement aligné. Cette sécurité évite qu’un média partagé change ailleurs dans la timeline, mais peut augmenter fortement la taille du résultat.
-- Un appel direct refuse d’écraser une session de sortie ou un WAV `_ottoaligned` déjà existant.
-- Les fichiers PTX de sortie doivent rester à côté de leur propre dossier `Audio Files`; les noms internes du catalogue PTX ne sont jamais interprétés comme des chemins système.
-- En AAF, Clip Gain, Clip Mute, effets, transitions complexes et métadonnées propres au DAW ne sont pas garantis. Les placements partageant le même mob/média ne bénéficient pas de l’isolation par placement offerte par le relink PTX; un nom de sortie `_ottoaligned` déjà présent est refusé plutôt que d’être écrasé.
-- Les jobs sont conservés en mémoire par le processus Flask. Un redémarrage perd leur état, et ce serveur local n’est pas une architecture distribuée ou multi-instance.
-- La limite de 2 Go s’applique à la requête compressée; aucune limite distincte n’est actuellement imposée à la taille décompressée des archives.
+- Physical media must be WAV files. The PTX path requires the Pro Tools layouts and metadata documented by the installed version of `pt_api`.
+- An overlap of less than 0.5 seconds is skipped.
+- The reference and target media of a pair must have the same sample rate; no resampling is performed.
+- The delay is computed from the first channel. The same curve is imposed on the other channels; no independent per-channel alignment is performed.
+- The default search window is ±20 ms. A larger real-world offset will not be found without increasing `max_shift_ms` on a direct engine call.
+- The DSP may introduce zeros at boundaries when the curve requests samples located outside the available portion.
+- PTX generates a full independent WAV per aligned placement. This safeguard prevents shared media from changing elsewhere in the timeline, but can significantly increase the size of the result.
+- A direct call refuses to overwrite an existing output session or an existing `_ottoaligned` WAV.
+- Output PTX files must remain alongside their own `Audio Files` folder; internal PTX catalog names are never interpreted as system paths.
+- In AAF, Clip Gain, Clip Mute, effects, complex transitions, and DAW-specific metadata are not guaranteed. Placements sharing the same mob/media do not benefit from the per-placement isolation offered by PTX relinking; an already-present `_ottoaligned` output name is refused rather than overwritten.
+- Jobs are kept in memory by the Flask process. A restart loses their state, and this local server is not a distributed or multi-instance architecture.
+- The 2 GB limit applies to the compressed request; no separate limit is currently imposed on the decompressed size of archives.
 
-## Dépendance `pt_api`
+## `pt_api` dependency
 
-`requirements.txt` installe `pt_api` depuis la branche publique `master`. Lors d’une publication coordonnée, il faut donc pousser et vérifier `pt_api` avant d’installer ou de déployer cette révision d’OttoAlign2.
+`requirements.txt` installs `pt_api` from the public `master` branch. For a coordinated release, `pt_api` must therefore be pushed and verified before installing or deploying this revision of OttoAlign2.
 
 ---
 
-*Conçu par Sébastien Bédard*
+*Designed by Sébastien Bédard*
