@@ -18,6 +18,8 @@ La validation de production a utilisé :
 
 Les corrections associées comprennent le support des longs offsets PTX, les layouts virtuels de production, les headers `0x2106` de 142/151 octets, les variantes `regn`, la reconstruction des records fixes `0x2629`, l’installation d’un PCM rendu compatible et l’index média UInt32.
 
+Une seconde validation, le 2026-07-16, couvre un catalogue de 71 médias utilisant des suffixes de nom nuls et une identité `0x1001` contenant un faux bloc vide. Sur 236 placements, 226 ont été alignés et 10 ignorés normalement. La sortie contient 297 médias catalogués, 226 WAV OA indépendants, aucun média de timeline manquant et une sauvegarde no-op bit-perfect. Cette validation exige `pt_api` 1.3.8 ou plus récent.
+
 ## Garanties du chemin PTX
 
 - La session cible et les WAV sources ne sont jamais écrasés.

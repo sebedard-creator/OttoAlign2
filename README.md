@@ -29,6 +29,8 @@ For each eligible PTX placement, OttoAlign2:
 
 The original PTX and its WAVs are never overwritten. Samples outside the processed portion remain those of the source file. The new WAV keeps the container and PCM subtype of the Pro Tools media, while renewing the metadata needed for relinking.
 
+Production validation now covers two independent PTX layouts. The first aligned 388 of 404 placements against a roughly 42-minute reference. The second aligned 226 of 236 placements, grew a zero-suffix catalog from 71 to 297 media, produced no missing timeline media, and preserved a byte-for-byte no-op save. This second case also validates reconstruction of a 31-byte `0x1001` identity containing a false empty-block signature, supported by `pt_api` 1.3.8.
+
 ### AAF processing
 
 The legacy AAF path writes WAVs suffixed `_ottoaligned`, modifies locators in a read-write copy of the AAF, then passes the output to `orchestrator.py`. It is maintained, but the extensive Pro Tools validation described above covers the PTX path.

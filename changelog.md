@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-16
+
+- Compatibilité avec `pt_api` 1.3.8 : catalogues PTX dont les noms WAV se terminent par quatre octets nuls et identités média `0x1001` contenant une séquence interprétable comme un faux bloc vide.
+- Validation complète sur une nouvelle cible : 236 placements, 226 alignés, 10 ignorés selon les règles existantes, 226 WAV indépendants en ligne et aucun média de timeline manquant. Le catalogue PTX est passé de 71 à 297 entrées et la sauvegarde no-op demeure byte-for-byte identique.
+
 ## 2026-07-15
 
 - Lecture des timelines PTX longues et de leurs offsets source 16/24/32 bits via la nouvelle version de `pt_api`; disparition de la coupure historique vers `10:07:41`.
