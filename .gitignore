@@ -13,5 +13,6 @@ Aligned_Audio_Files/
 # IDEs
 .idea/
 .vscode/
-temp/  
+temp/
 .venv/
+/test_sessions_original/

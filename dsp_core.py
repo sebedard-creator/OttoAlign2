@@ -64,7 +64,7 @@ def dynamic_align(target, source, fs, window_ms=100, hop_ms=25, max_delay_ms=20,
         times.append(i + window_samples//2)
         
     if not delays:
-        return target # No signal detected above threshold
+        return target.copy(), np.zeros(num_samples, dtype=np.float64)
         
     delays = np.array(delays)
     
