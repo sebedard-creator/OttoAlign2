@@ -1,72 +1,24 @@
 # Handoff OttoAlign2
 
-**État vérifié le 2026-07-15**
+**État vérifié le 2026-07-22**
 
 ## État actuel
 
-Le chemin PTX non destructif est fonctionnel de bout en bout. Il lit les portions superposées, rend le décalage, clone un WAV indépendant pour chaque placement, relie seulement ce placement et sauvegarde la copie PTX réellement modifiée. Les originaux restent intacts.
+1. La piste source `Audio 1` reste exclue lorsqu'une même session contient la référence et la cible : elle n'est ni réalignée, ni renommée, ni réécrite.
+2. OttoAlign2 appelle directement `pt_api` 1.3.9. Aucun monkey patch ne surcharge `ProToolsSession`.
+3. **Préflight Premiere sûr** : avant tout rendu PTX, `align_engine.py` appelle `get_relink_write_status()` pour chaque placement. Le corpus `target4` est détecté comme `premiere_virtual_media` avec header `0x2106` de 173 octets; ce placement reste intact dans la copie PTX, sans WAV créé ni suffixe `_ALIGNED`. Le rapport liste piste, clip, TC In, TC Out (borne de fin), durée et raison; les autres placements continuent.
+4. **Blocage d'écriture Premiere** : les headers variables et les clips virtuels sont lisibles, mais `target4_api1381.ptx`, `target4_aligned.ptx`, le contrôle de référence virtuelle et le contrôle de catalogue hybride sont tous refusés par Pro Tools avec `End of stream encountered`. Un `Save Copy In…` conserve lui aussi le header Premiere 173 octets et le clip virtuel; il ne règle pas le problème. Le skip préventif est sûr, mais ne constitue pas un relink PTX Premiere.
+5. **Contournement validé** : après `Consolidate Clip`, `target4_consolidated_reference.ptx` utilise un parent natif et un header `0x2106` de 151 octets. OttoAlign a créé `OA00000001.wav`/`target3_01_ALIGNED`, et `target4_consolidated_otto.ptx` s'est ouvert correctement dans Pro Tools. Le témoin n'avait pas de handles supplémentaires; le workflow « consolidation élargie puis retrim » reste à valider si nécessaire.
+6. Les corpus `target3`, `target4` et `target5` non consolidés se rechargent dans le parseur Python, ce qui ne constitue pas une validation Pro Tools. Les résultats publiables sont les chemins natifs, le contournement consolidé et une session mixte où les clips Premiere détectés sont explicitement laissés intacts.
+7. Le calcul DSP conserve le filtrage SNR et la fenêtre `max_shift_ms = 150` ms déjà validés.
+8. La sélection de l'ancre de groupe utilise `interp=1` : la correction rendue est déjà un décalage entier, donc l'ancienne interpolation FFT ×16 n'apportait aucun bénéfice à la sortie. Les comparaisons réelles courtes ont conservé le même décalage entier et la même polarité, avec un gain de temps mesuré de 9 à 12× sur l'estimation. La validation « real world » reste requise.
 
-La validation de production a utilisé :
+## Dépendance
 
-- une référence PTX d’environ 42 minutes, 135 régions sur `REF PLANS`;
-- une cible PTX de 404 placements sur `PFX 1` et `PFX 2`;
-- 388 placements alignés et 16 ignorés pour chevauchement inférieur à 0,5 seconde;
-- 388 nouveaux WAV indépendants, tous présents et en ligne;
-- une session finale ouverte et écoutée avec succès dans Pro Tools;
-- un placement dupliqué confirmé avec deux noms et deux identités de sortie distincts;
-- une sauvegarde/relecture sans autre mutation demeurée byte-for-byte identique.
+`requirements.txt` pointe vers le tag `v1.3.9`. Ne pas présenter cette dépendance comme un correctif de relink Premiere; OttoAlign2 peut toutefois être déployé pour les sessions mixtes à condition de présenter explicitement les clips Premiere détectés comme ignorés.
 
-Les corrections associées comprennent le support des longs offsets PTX, les layouts virtuels de production, les headers `0x2106` de 142/151 octets, les variantes `regn`, la reconstruction des records fixes `0x2629`, l’installation d’un PCM rendu compatible et l’index média UInt32.
+La lecture de contexte (« handles ») est limitée à une seconde disponible de chaque côté du placement. Cette limite réduit la taille des FFT et les E/S sur les clips fragmentés; elle devra être confirmée sur une session de production avec fondus réels.
 
-Une seconde validation, le 2026-07-16, couvre un catalogue de 71 médias utilisant des suffixes de nom nuls et une identité `0x1001` contenant un faux bloc vide. Sur 236 placements, 226 ont été alignés et 10 ignorés normalement. La sortie contient 297 médias catalogués, 226 WAV OA indépendants, aucun média de timeline manquant et une sauvegarde no-op bit-perfect. Cette validation exige `pt_api` 1.3.8 ou plus récent.
+## Documents historiques
 
-## Garanties du chemin PTX
-
-- La session cible et les WAV sources ne sont jamais écrasés.
-- Le fichier de sortie reste à côté du dossier `Audio Files` cible pendant sa construction.
-- Chaque placement traité reçoit un nouveau fichier physique de même longueur de nom UTF-8 que sa source, une identité BWF/PTX renouvelée et un nom de clip unique.
-- Seule la portion visible traitée change; le reste du WAV cloné est conservé.
-- Une erreur fatale annule la session de sortie et supprime les médias créés pendant la transaction.
-- Le serveur archive le PTX effectivement modifié, et non la session cible originale.
-
-## AAF
-
-La cible AAF est ouverte en mode `rw`, puis finalisée par `orchestrator.py`. Le nom `_ottoaligned` fonctionne aussi avec une extension `.WAV` en majuscules. Ce chemin est antérieur au relink PTX et n’offre pas la même isolation par placement lorsque plusieurs clips partagent un mob ou un média. Il doit donc être validé avec prudence pour tout nouveau cas AAF complexe.
-
-## Tests automatisés
-
-Le dossier `tests/` couvre actuellement :
-
-- le codage base36 et les noms WAV PTX de longueur constante;
-- les collisions de noms physiques et de noms de clips;
-- le nommage AAF et l’ouverture de la cible AAF en lecture-écriture;
-- le contrat de retour DSP pour une entrée courte;
-- les corrections de délais entiers positifs et négatifs.
-
-La suite complète doit être lancée depuis le dépôt avec `pt_api` disponible :
-
-```bash
-python -m unittest discover -s tests
-```
-
-## Limites à préserver dans les futures révisions
-
-- WAV seulement; même fréquence d’échantillonnage pour chaque paire.
-- Chevauchement minimal de 0,5 seconde.
-- Recherche ±20 ms par défaut.
-- Courbe calculée sur le premier canal et appliquée à tous les canaux.
-- Un WAV complet par placement PTX aligné, donc croissance possible de l’espace disque.
-- Le PTX dépend strictement des layouts pris en charge par la version publiée de `pt_api`.
-- Les métadonnées AAF complexes et l’isolation des placements partageant un média ne sont pas garanties.
-- État Flask en mémoire seulement; taille décompressée des ZIP non plafonnée séparément.
-
-## Publication coordonnée
-
-`requirements.txt` pointe vers `https://github.com/sebedard-creator/pt_api.git@master`. Publier dans cet ordre :
-
-1. commit et push de `Y:\pt_api`;
-2. vérification que le commit public contient la version attendue;
-3. commit et push de `Y:\OttoAlign2`;
-4. installation propre de `requirements.txt` dans un environnement neuf si un déploiement est prévu.
-
-Les archives et sessions originales sous `test_sessions_original/` restent locales et ignorées par Git. Les sorties alignées, rapports et WAV OA générés ne doivent pas être commités.
+`patch_api.md` reste le relevé historique du diagnostic. Ses parties compatibles et sûres sont intégrées dans `pt_api`; le code temporaire qui supprimait silencieusement des événements pendant une lecture n'a pas été repris.

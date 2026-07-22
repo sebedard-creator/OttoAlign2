@@ -5,16 +5,21 @@ from types import SimpleNamespace
 from unittest import mock
 
 from align_engine import (
+    HANDLE_DURATION_SECONDS,
     _aligned_aaf_filename,
     _base36,
     _unique_aligned_clip_name,
     _unique_ptx_wav_name,
+    _ptx_relink_skip_message,
     align_aafs,
     get_all_clips,
 )
 
 
 class AlignmentHelperTests(unittest.TestCase):
+    def test_analysis_handle_is_limited_to_one_second_per_side(self):
+        self.assertEqual(HANDLE_DURATION_SECONDS, 1.0)
+
     def test_preflight_rejects_existing_output_without_overwriting_it(self):
         with tempfile.TemporaryDirectory() as root:
             audio_dir = os.path.join(root, "Audio Files")
@@ -116,6 +121,100 @@ class AlignmentHelperTests(unittest.TestCase):
         self.assertEqual(clips, [])
         self.assertIs(returned_file, fake_file)
         opener.assert_called_once_with("target.aaf", "rw")
+
+    def test_premiere_virtual_skip_is_reported_without_relinking(self):
+        class FakeTargetSession:
+            sample_rate = 48_000
+            frame_rate_enum = 0x09
+
+            def __init__(self):
+                self.save_calls = []
+                self.relink_calls = []
+
+            def get_clips(self):
+                return []
+
+            def get_relink_write_status(self, *args):
+                return {
+                    "supported": False,
+                    "code": "premiere_virtual_media",
+                    "detail_header_length": 173,
+                }
+
+            def relink_clip(self, *args):
+                self.relink_calls.append(args)
+                raise AssertionError("unsupported virtual media must not be relinked")
+
+            def save(self, path):
+                self.save_calls.append(path)
+
+        with tempfile.TemporaryDirectory() as root:
+            audio_dir = os.path.join(root, "Audio Files")
+            os.makedirs(audio_dir)
+            reference = os.path.join(root, "reference.ptx")
+            target = os.path.join(root, "target.ptx")
+            output = os.path.join(root, "target_aligned.ptx")
+            for path in (reference, target):
+                with open(path, "wb") as stream:
+                    stream.write(b"ptx placeholder")
+
+            ref_clip = {
+                "track": "Reference",
+                "clip_name": "Reference.01",
+                "timeline_start": 0,
+                "timeline_end": 48_000,
+                "source_start": 0,
+                "physical_filename": "reference.wav",
+                "mob": None,
+            }
+            target_clip = {
+                "track": "DX",
+                "clip_name": "Premiere virtual.01",
+                "timeline_start": 0,
+                "timeline_end": 48_000,
+                "source_start": 0,
+                "physical_filename": "premiere.wav",
+                "mob": None,
+            }
+            target_session = FakeTargetSession()
+            with mock.patch(
+                "align_engine.get_all_clips",
+                side_effect=[([ref_clip], SimpleNamespace()), ([target_clip], target_session)],
+            ):
+                align_aafs(reference, audio_dir, target, audio_dir, output)
+
+            self.assertTrue(os.path.isfile(output))
+            self.assertEqual(target_session.relink_calls, [])
+            self.assertEqual(target_session.save_calls, [output])
+            self.assertFalse(any("_OA" in name for name in os.listdir(audio_dir)))
+            with open(
+                os.path.join(audio_dir, "OttoAlign_Report.txt"),
+                encoding="utf-8",
+            ) as report:
+                contents = report.read()
+            self.assertIn("Piste: DX", contents)
+            self.assertIn("TC In: 00:00:00:00", contents)
+            self.assertIn("TC Out (fin): 00:00:01:00", contents)
+            self.assertIn("173 octets", contents)
+
+    def test_premiere_virtual_skip_message_has_timecode_in_and_out(self):
+        engine = __import__("pt_api").TimecodeEngine(48_000, 0x09)
+        message = _ptx_relink_skip_message(
+            engine,
+            {
+                "track": "DX",
+                "clip_name": "Premiere virtual.01",
+                "timeline_start": 0,
+                "timeline_end": 48_000,
+            },
+            {
+                "supported": False,
+                "code": "premiere_virtual_media",
+                "detail_header_length": 173,
+            },
+        )
+        self.assertIn("TC In: 00:00:00:00", message)
+        self.assertIn("TC Out (fin): 00:00:01:00", message)
 
 
 if __name__ == "__main__":

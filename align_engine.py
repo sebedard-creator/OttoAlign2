@@ -8,6 +8,11 @@ import tempfile
 
 import pt_api
 
+
+# Audio context read on either side of a placement for analysis and render.
+# Kept intentionally bounded to limit FFT size and I/O for fragmented media.
+HANDLE_DURATION_SECONDS = 1.0
+
 def get_clip_absolute_times(sequence):
     """
     Returns a list of dictionaries containing info for every clip in the sequence.
@@ -241,13 +246,36 @@ def _aligned_aaf_filename(filename):
     return f"{stem}_ottoaligned{extension}"
 
 
+def _ptx_relink_skip_message(timecode_engine, clip, status):
+    """Describe a PTX relink preflight skip for the user-facing report."""
+    tc_in = timecode_engine.samples_to_timecode(clip["timeline_start"])
+    tc_out = timecode_engine.samples_to_timecode(clip["timeline_end"])
+    duration = timecode_engine.samples_to_timecode(
+        clip["timeline_end"] - clip["timeline_start"]
+    )
+    header_length = status.get("detail_header_length")
+    if status.get("code") == "premiere_virtual_media":
+        reason = (
+            "média virtuel de production à en-tête 0x2106 variable"
+            + (f" ({header_length} octets)" if header_length is not None else "")
+            + "; consolidation dans Pro Tools requise avant l'alignement"
+        )
+    else:
+        reason = status.get("reason", "pré-vérification de relink non concluante")
+    return (
+        f"Piste: {clip['track']} | Clip: {clip['clip_name']} | "
+        f"TC In: {tc_in} | TC Out (fin): {tc_out} | Durée: {duration} "
+        f"- Raison: {reason}"
+    )
+
+
 def align_aafs(
     ref_aaf_path,
     ref_audio_dir,
     target_aaf_path,
     target_audio_dir,
     out_aaf_path,
-    max_shift_ms=20,
+    max_shift_ms=150,
 ):
     if (
         isinstance(max_shift_ms, bool)
@@ -360,245 +388,340 @@ def align_aafs(
         raise
 
     try:
+        if ref_clips:
+            ref_track_name = ref_clips[0]["track"]
+            # If ref and target sessions are the same file, do not align clips on the reference track
+            if is_ref_ptx and is_target_ptx and os.path.normcase(os.path.abspath(ref_aaf_path)) == os.path.normcase(os.path.abspath(target_aaf_path)):
+                target_clips = [c for c in target_clips if c["track"] != ref_track_name]
+
+        if is_target_ptx:
+            timecode_engine = pt_api.TimecodeEngine(
+                target_f.sample_rate,
+                target_f.frame_rate_enum,
+            )
+            relinkable_target_clips = []
+            for t_clip in target_clips:
+                try:
+                    status = target_f.get_relink_write_status(
+                        t_clip["track"],
+                        t_clip["clip_name"],
+                        t_clip["timeline_start"],
+                    )
+                except (TypeError, ValueError) as exc:
+                    status = {
+                        "supported": False,
+                        "code": "unverified_relink_target",
+                        "reason": f"pré-vérification de relink impossible ({exc})",
+                    }
+                if not status["supported"]:
+                    message = _ptx_relink_skip_message(
+                        timecode_engine,
+                        t_clip,
+                        status,
+                    )
+                    print(f"Skipped {message}")
+                    skipped_clips_log.append(message)
+                    continue
+                relinkable_target_clips.append(t_clip)
+            target_clips = relinkable_target_clips
+
+        target_clips_grouped = {}
         for t_clip in target_clips:
-            ref_clip, overlap = find_overlapping_reference(t_clip, ref_clips)
-            t_wav_name = t_clip.get("physical_filename") or get_physical_filename(
-                t_clip["mob"]
-            )
-            if not ref_clip:
-                message = (
-                    f"{t_wav_name} (Timecode Start: {t_clip['timeline_start']}) "
-                    "- Raison: Aucun audio de référence en face"
-                )
-                print(f"Skipped {message}")
-                skipped_clips_log.append(message)
-                continue
+            t_wav_name = t_clip.get("physical_filename") or get_physical_filename(t_clip["mob"])
+            if t_wav_name not in target_clips_grouped:
+                target_clips_grouped[t_wav_name] = []
+            target_clips_grouped[t_wav_name].append(t_clip)
 
-            overlap_start = max(t_clip["timeline_start"], ref_clip["timeline_start"])
-            overlap_end = min(t_clip["timeline_end"], ref_clip["timeline_end"])
-            overlap_len = overlap_end - overlap_start
-            t_source_start = t_clip["source_start"] + (
-                overlap_start - t_clip["timeline_start"]
-            )
-            r_source_start = ref_clip["source_start"] + (
-                overlap_start - ref_clip["timeline_start"]
-            )
-            r_wav_name = ref_clip.get("physical_filename") or get_physical_filename(
-                ref_clip["mob"]
-            )
-            t_wav_path = os.path.join(target_audio_dir, t_wav_name)
-            r_wav_path = os.path.join(ref_audio_dir, r_wav_name)
+        for t_wav_name, group in target_clips_grouped.items():
+            best_snr = -1
+            best_anchor = None
+            group_data = []
 
-            if not os.path.isfile(t_wav_path) or not os.path.isfile(r_wav_path):
-                message = (
-                    f"{t_wav_name} (Timecode Start: {t_clip['timeline_start']}) "
-                    "- Raison: média cible ou référence introuvable"
-                )
-                print(f"Skipped {message}")
-                skipped_clips_log.append(message)
-                continue
-
-            try:
-                t_info = sf.info(t_wav_path)
-                r_info = sf.info(r_wav_path)
-                t_fs = t_info.samplerate
-            except Exception as exc:
-                message = f"{t_wav_name} - Raison: lecture impossible ({exc})"
-                print(f"Skipped {message}")
-                skipped_clips_log.append(message)
-                continue
-            if r_info.samplerate != t_fs:
-                message = (
-                    f"{t_wav_name} - Raison: fréquences d'échantillonnage "
-                    f"incompatibles ({t_fs} Hz / {r_info.samplerate} Hz)"
-                )
-                print(f"Skipped {message}")
-                skipped_clips_log.append(message)
-                continue
-            if overlap < t_info.samplerate * 0.5:
-                message = (
-                    f"{t_wav_name} - Raison: chevauchement inférieur à 0,5 seconde"
-                )
-                print(f"Skipped {message}")
-                skipped_clips_log.append(message)
-                continue
-
-            r_audio_overlap = read_audio_chunk(
-                r_wav_path, r_source_start, overlap_len
-            )
-            if r_audio_overlap is None:
-                message = f"{t_wav_name} - Raison: lecture de référence impossible"
-                print(f"Skipped {message}")
-                skipped_clips_log.append(message)
-                continue
-
-            if is_target_ptx:
-                if (
-                    t_source_start < 0
-                    or t_source_start + overlap_len > t_info.frames
-                ):
+            for t_clip in group:
+                ref_clip, overlap = find_overlapping_reference(t_clip, ref_clips)
+                if not ref_clip:
                     message = (
-                        f"{t_wav_name} - Raison: portion utilisée hors des bornes "
-                        "du média cible"
+                        f"{t_wav_name} (Timecode Start: {t_clip['timeline_start']}) "
+                        "- Raison: Aucun audio de référence en face"
                     )
                     print(f"Skipped {message}")
                     skipped_clips_log.append(message)
                     continue
+
+                overlap_start = max(t_clip["timeline_start"], ref_clip["timeline_start"])
+                overlap_end = min(t_clip["timeline_end"], ref_clip["timeline_end"])
+                overlap_len = overlap_end - overlap_start
+                t_source_start = t_clip["source_start"] + (
+                    overlap_start - t_clip["timeline_start"]
+                )
+                r_source_start = ref_clip["source_start"] + (
+                    overlap_start - ref_clip["timeline_start"]
+                )
+                r_wav_name = ref_clip.get("physical_filename") or get_physical_filename(
+                    ref_clip["mob"]
+                )
+                t_wav_path = os.path.join(target_audio_dir, t_wav_name)
+                r_wav_path = os.path.join(ref_audio_dir, r_wav_name)
+
+                if not os.path.isfile(t_wav_path) or not os.path.isfile(r_wav_path):
+                    message = (
+                        f"{t_wav_name} (Timecode Start: {t_clip['timeline_start']}) "
+                        "- Raison: média cible ou référence introuvable"
+                    )
+                    print(f"Skipped {message}")
+                    skipped_clips_log.append(message)
+                    continue
+
                 try:
-                    t_data, read_fs = sf.read(
-                        t_wav_path,
-                        start=t_source_start,
-                        frames=overlap_len,
-                        always_2d=True,
-                    )
-                except Exception as exc:
-                    message = (
-                        f"{t_wav_name} - Raison: lecture de la portion cible "
-                        f"impossible ({exc})"
-                    )
-                    print(f"Skipped {message}")
-                    skipped_clips_log.append(message)
-                    continue
-                if read_fs != t_fs or len(t_data) != overlap_len:
-                    message = (
-                        f"{t_wav_name} - Raison: portion cible tronquée ou "
-                        "fréquence incohérente"
-                    )
-                    print(f"Skipped {message}")
-                    skipped_clips_log.append(message)
-                    continue
-            else:
-                try:
-                    t_data, read_fs = sf.read(t_wav_path, always_2d=True)
+                    t_info = sf.info(t_wav_path)
+                    r_info = sf.info(r_wav_path)
+                    t_fs = t_info.samplerate
                 except Exception as exc:
                     message = f"{t_wav_name} - Raison: lecture impossible ({exc})"
                     print(f"Skipped {message}")
                     skipped_clips_log.append(message)
                     continue
-                if read_fs != t_fs:
-                    raise RuntimeError("Target WAV sample rate changed while reading.")
-                source_padded = np.zeros(len(t_data), dtype=np.float32)
-                insert_start = t_source_start
-                insert_end = t_source_start + overlap_len
-                if insert_start < 0:
-                    r_audio_overlap = r_audio_overlap[-insert_start:]
-                    insert_start = 0
-                if insert_end > len(source_padded):
-                    excess = insert_end - len(source_padded)
-                    r_audio_overlap = r_audio_overlap[:-excess]
-                    insert_end = len(source_padded)
-                if len(r_audio_overlap) > 0:
-                    source_padded[insert_start:insert_end] = r_audio_overlap
-                r_audio_overlap = source_padded
-
-            t_mono = t_data[:, 0].astype(np.float32)
-            aligned_mono, delays = dynamic_align(
-                t_mono,
-                r_audio_overlap,
-                t_fs,
-                max_delay_ms=max_shift_ms,
-            )
-            if t_data.shape[1] > 1:
-                from scipy.interpolate import CubicSpline
-
-                final_data = t_data.copy()
-                final_data[:, 0] = aligned_mono
-                num_samples = len(t_data)
-                t_orig = np.arange(num_samples)
-                t_new = t_orig + delays
-                for channel in range(1, t_data.shape[1]):
-                    spline = CubicSpline(t_orig, t_data[:, channel])
-                    aligned_channel = spline(t_new)
-                    aligned_channel[t_new < 0] = 0
-                    aligned_channel[t_new > num_samples - 1] = 0
-                    final_data[:, channel] = aligned_channel
-            else:
-                final_data = aligned_mono
-
-            if is_target_ptx:
-                out_wav_name, output_serial = _unique_ptx_wav_name(
-                    t_wav_name, output_serial, reserved_names
-                )
-                out_wav_path = os.path.join(target_audio_dir, out_wav_name)
-                descriptor, rendered_path = tempfile.mkstemp(
-                    prefix=".ottoalign_",
-                    suffix=".wav",
-                    dir=target_audio_dir,
-                )
-                os.close(descriptor)
-                try:
-                    shutil.copyfile(t_wav_path, rendered_path)
-                    with sf.SoundFile(rendered_path, mode="r+") as rendered:
-                        rendered.seek(t_source_start)
-                        rendered.write(final_data)
-                    out_clip_name = _unique_aligned_clip_name(
-                        t_clip["clip_name"], reserved_clip_names
+                if r_info.samplerate != t_fs:
+                    message = (
+                        f"{t_wav_name} - Raison: fréquences d'échantillonnage "
+                        f"incompatibles ({t_fs} Hz / {r_info.samplerate} Hz)"
                     )
-                    result = target_f.relink_clip(
-                        t_clip["track"],
-                        t_clip["clip_name"],
-                        t_clip["timeline_start"],
-                        out_clip_name,
-                        t_wav_path,
-                        out_wav_path,
-                        replacement_audio_path=rendered_path,
+                    print(f"Skipped {message}")
+                    skipped_clips_log.append(message)
+                    continue
+                if overlap_len < t_info.samplerate * 0.05:
+                    message = (
+                        f"{t_wav_name} - Raison: chevauchement inférieur à 0,05 seconde"
                     )
-                finally:
+                    print(f"Skipped {message}")
+                    skipped_clips_log.append(message)
+                    continue
+
+                # Add up to one second of context on either side for fades.
+                handle_samples = int(t_fs * HANDLE_DURATION_SECONDS)
+                handle_start = min(handle_samples, t_source_start, r_source_start)
+                if handle_start > 0:
+                    t_source_start -= handle_start
+                    r_source_start -= handle_start
+                    overlap_len += handle_start
+                    
+                available_t_end = t_info.frames - (t_source_start + overlap_len)
+                available_r_end = r_info.frames - (r_source_start + overlap_len)
+                handle_end = min(handle_samples, available_t_end, available_r_end)
+                if handle_end > 0:
+                    overlap_len += handle_end
+
+                r_audio_overlap = read_audio_chunk(
+                    r_wav_path, r_source_start, overlap_len
+                )
+                if r_audio_overlap is None:
+                    message = f"{t_wav_name} - Raison: lecture de référence impossible"
+                    print(f"Skipped {message}")
+                    skipped_clips_log.append(message)
+                    continue
+
+                if is_target_ptx:
+                    if (
+                        t_source_start < 0
+                        or t_source_start + overlap_len > t_info.frames
+                    ):
+                        message = (
+                            f"{t_wav_name} - Raison: portion utilisée hors des bornes "
+                            "du média cible"
+                        )
+                        print(f"Skipped {message}")
+                        skipped_clips_log.append(message)
+                        continue
                     try:
-                        os.remove(rendered_path)
-                    except FileNotFoundError:
-                        pass
-                created_audio_files.append(out_wav_path)
-                clip_print_name = result["physical_filename"]
-            else:
-                out_wav_name = _aligned_aaf_filename(t_wav_name)
-                out_wav_path = os.path.join(target_audio_dir, out_wav_name)
-                if os.path.normcase(out_wav_path) == os.path.normcase(t_wav_path):
-                    raise ValueError(
-                        "AAF target media already uses the _ottoaligned suffix."
-                    )
-                if os.path.exists(out_wav_path):
-                    raise FileExistsError(
-                        f"AAF output WAV already exists: {out_wav_path}"
-                    )
-                sf.write(
-                    out_wav_path,
-                    final_data,
-                    t_fs,
-                    subtype=t_info.subtype,
+                        t_data, read_fs = sf.read(
+                            t_wav_path,
+                            start=t_source_start,
+                            frames=overlap_len,
+                            always_2d=True,
+                        )
+                    except Exception as exc:
+                        message = (
+                            f"{t_wav_name} - Raison: lecture de la portion cible "
+                            f"impossible ({exc})"
+                        )
+                        print(f"Skipped {message}")
+                        skipped_clips_log.append(message)
+                        continue
+                    if read_fs != t_fs or len(t_data) != overlap_len:
+                        message = (
+                            f"{t_wav_name} - Raison: portion cible tronquée ou "
+                            "fréquence incohérente"
+                        )
+                        print(f"Skipped {message}")
+                        skipped_clips_log.append(message)
+                        continue
+                else:
+                    try:
+                        t_data, read_fs = sf.read(t_wav_path, always_2d=True)
+                    except Exception as exc:
+                        message = f"{t_wav_name} - Raison: lecture impossible ({exc})"
+                        print(f"Skipped {message}")
+                        skipped_clips_log.append(message)
+                        continue
+                    if read_fs != t_fs:
+                        raise RuntimeError("Target WAV sample rate changed while reading.")
+                    source_padded = np.zeros(len(t_data), dtype=np.float32)
+                    insert_start = t_source_start
+                    insert_end = t_source_start + overlap_len
+                    if insert_start < 0:
+                        r_audio_overlap = r_audio_overlap[-insert_start:]
+                        insert_start = 0
+                    if insert_end > len(source_padded):
+                        excess = insert_end - len(source_padded)
+                        r_audio_overlap = r_audio_overlap[:-excess]
+                        insert_end = len(source_padded)
+                    if len(r_audio_overlap) > 0:
+                        source_padded[insert_start:insert_end] = r_audio_overlap
+                    r_audio_overlap = source_padded
+
+                t_mono = t_data[:, 0].astype(np.float32)
+                
+                from dsp_core import gcc_phat
+                delay, inv, snr = gcc_phat(
+                    t_mono, 
+                    r_audio_overlap, 
+                    fs=t_fs, 
+                    max_tau=max_shift_ms/1000.0, 
+                    # Grouped placements are rendered with an integer static
+                    # shift below.  Fractional FFT interpolation would be
+                    # rounded away, while multiplying the largest transform
+                    # by 16 for no output benefit.
+                    interp=1,
+                    return_polarity=True, 
+                    return_snr=True
                 )
-                created_audio_files.append(out_wav_path)
-                mob = t_clip["mob"]
-                if "_ottoaligned" not in mob.name.casefold():
-                    if isinstance(mob, aaf2.mobs.MasterMob):
-                        mob.name += "_ottoaligned"
-                        for slot in mob.slots:
-                            if (
-                                isinstance(slot.segment, aaf2.components.SourceClip)
-                                and slot.segment.mob
-                            ):
-                                if "_ottoaligned" not in slot.segment.mob.name.casefold():
-                                    slot.segment.mob.name += "_ottoaligned"
+                
+                if snr > best_snr:
+                    best_snr = snr
+                    best_anchor = (delay, inv)
+                    
+                group_data.append({
+                    "t_clip": t_clip,
+                    "t_data": t_data,
+                    "t_fs": t_fs,
+                    "r_audio_overlap": r_audio_overlap,
+                    "t_source_start": t_source_start
+                })
+
+            for data in group_data:
+                t_clip = data["t_clip"]
+                t_data = data["t_data"]
+                t_fs = data["t_fs"]
+                r_audio_overlap = data["r_audio_overlap"]
+                t_source_start = data["t_source_start"]
+                t_mono = t_data[:, 0].astype(np.float32)
+
+                aligned_mono, delays, is_inverted = dynamic_align(
+                    t_mono,
+                    r_audio_overlap,
+                    t_fs,
+                    max_delay_ms=max_shift_ms,
+                    anchor_hint=best_anchor
+                )
+                if t_data.shape[1] > 1:
+                    from scipy.interpolate import CubicSpline
+
+                    final_data = t_data.copy()
+                    final_data[:, 0] = aligned_mono
+                    num_samples = len(t_data)
+                    t_orig = np.arange(num_samples)
+                    t_new = t_orig + delays
+                    for channel in range(1, t_data.shape[1]):
+                        spline = CubicSpline(t_orig, t_data[:, channel])
+                        aligned_channel = spline(t_new)
+                        aligned_channel[t_new < 0] = 0
+                        aligned_channel[t_new > num_samples - 1] = 0
+                        if is_inverted:
+                            aligned_channel = -aligned_channel
+                        final_data[:, channel] = aligned_channel
+                else:
+                    final_data = aligned_mono
+
+                if is_target_ptx:
+                    out_wav_name, output_serial = _unique_ptx_wav_name(
+                        t_wav_name, output_serial, reserved_names
+                    )
+                    out_wav_path = os.path.join(target_audio_dir, out_wav_name)
+                    descriptor, rendered_path = tempfile.mkstemp(
+                        prefix=".ottoalign_",
+                        suffix=".wav",
+                        dir=target_audio_dir,
+                    )
+                    os.close(descriptor)
+                    try:
+                        shutil.copyfile(t_wav_path, rendered_path)
+                        with sf.SoundFile(rendered_path, mode="r+") as rendered:
+                            rendered.seek(t_source_start)
+                            rendered.write(final_data)
+                        out_clip_name = _unique_aligned_clip_name(
+                            t_clip["clip_name"], reserved_clip_names
+                        )
+                        result = target_f.relink_clip(
+                            t_clip["track"],
+                            t_clip["clip_name"],
+                            t_clip["timeline_start"],
+                            out_clip_name,
+                            t_wav_path,
+                            out_wav_path,
+                            replacement_audio_path=rendered_path,
+                        )
+                    finally:
+                        try:
+                            os.remove(rendered_path)
+                        except FileNotFoundError:
+                            pass
+                    created_audio_files.append(out_wav_path)
+                    clip_print_name = result["physical_filename"]
+                else:
+                    out_wav_name = _aligned_aaf_filename(t_wav_name)
+                    out_wav_path = os.path.join(target_audio_dir, out_wav_name)
+                    if os.path.normcase(out_wav_path) == os.path.normcase(t_wav_path):
+                        raise ValueError(
+                            "AAF target media already uses the _ottoaligned suffix."
+                        )
+                    if os.path.exists(out_wav_path):
+                        raise FileExistsError(
+                            f"AAF output WAV already exists: {out_wav_path}"
+                        )
+                    sf.write(
+                        out_wav_path,
+                        final_data,
+                        t_fs,
+                        subtype=t_info.subtype,
+                    )
+                    created_audio_files.append(out_wav_path)
+                    mob = t_clip["mob"]
+                    if "_ottoaligned" not in mob.name.casefold():
+                        if isinstance(mob, aaf2.mobs.MasterMob):
+                            mob.name += "_ottoaligned"
+                            for slot in mob.slots:
                                 if (
-                                    slot.segment.mob.descriptor
-                                    and "Locator" in slot.segment.mob.descriptor
+                                    isinstance(slot.segment, aaf2.components.SourceClip)
+                                    and slot.segment.mob
                                 ):
-                                    for locator in slot.segment.mob.descriptor["Locator"]:
-                                        old_url = locator["URLString"].value
-                                        if "_ottoaligned" not in old_url.casefold():
-                                            locator["URLString"].value = (
-                                                _aligned_aaf_filename(old_url)
-                                            )
-                    elif isinstance(mob, aaf2.mobs.SourceMob):
-                        mob.name += "_ottoaligned"
-                        if mob.descriptor and "Locator" in mob.descriptor:
-                            for locator in mob.descriptor["Locator"]:
-                                old_url = locator["URLString"].value
-                                if "_ottoaligned" not in old_url.casefold():
-                                    locator["URLString"].value = (
-                                        _aligned_aaf_filename(old_url)
-                                    )
-                clip_print_name = mob.name
+                                    if "_ottoaligned" not in slot.segment.mob.name.casefold():
+                                        slot.segment.mob.name += "_ottoaligned"
+                                    if (
+                                        slot.segment.mob.descriptor
+                                        and "Locator" in slot.segment.mob.descriptor
+                                    ):
+                                        for locator in slot.segment.mob.descriptor["Locator"]:
+                                            old_url = locator["URLString"].value
+                                            if "_ottoaligned" not in old_url.casefold():
+                                                locator["URLString"].value = _aligned_aaf_filename(old_url)
+                        elif isinstance(mob, aaf2.mobs.SourceMob):
+                            mob.name += "_ottoaligned"
+                            if mob.descriptor and "Locator" in mob.descriptor:
+                                for locator in mob.descriptor["Locator"]:
+                                    old_url = locator["URLString"].value
+                                    if "_ottoaligned" not in old_url.casefold():
+                                        locator["URLString"].value = _aligned_aaf_filename(old_url)
+                    clip_print_name = mob.name
 
             shift_ms = float(np.mean(delays)) * 1000 / t_fs
             print(f"Dynamically aligned {clip_print_name}")
@@ -649,14 +772,16 @@ def align_aafs(
         f"{len(aligned_clips_log)} clips."
     )
 
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("ref_aaf")
-    parser.add_argument("ref_audio_dir")
-    parser.add_argument("target_aaf")
-    parser.add_argument("target_audio_dir")
-    parser.add_argument("out_aaf")
-    args = parser.parse_args()
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) < 6:
+        print('Usage: align_engine.py ref_session ref_audio target_session target_audio out_session')
+        sys.exit(1)
     
-    align_aafs(args.ref_aaf, args.ref_audio_dir, args.target_aaf, args.target_audio_dir, args.out_aaf)
+    ref_session = sys.argv[1]
+    ref_audio = sys.argv[2]
+    target_session = sys.argv[3]
+    target_audio = sys.argv[4]
+    out_session = sys.argv[5]
+    
+    align_aafs(ref_session, ref_audio, target_session, target_audio, out_session)

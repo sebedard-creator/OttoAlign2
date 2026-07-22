@@ -16,3 +16,15 @@ Aligned_Audio_Files/
 temp/
 .venv/
 /test_sessions_original/
+/perf_interp1_validation/
+/tests_21_juil/
+/debug_dsp/
+/debug_dsp_*.py
+/output*.log
+/temp_relink.txt
+/test_3_pairs.py
+/test_events.py
+
+# Archives locales du diagnostic du monkey patch, non exécutées.
+/patch_api.md
+/patch_autoalign.md
